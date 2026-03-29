@@ -1,0 +1,31 @@
+# Секрети
+.env
+
+# Дані юзерів і стан бота
+users.json
+user_artists.json
+user_youtube.json
+bot_msg_ids.json
+sent_games.json
+sent_gog.json
+sent_steam.json
+sent_releases.json
+sent_youtube.json
+
+# Контент (меми, цитати тощо — завантажуються через адміна)
+content/
+
+# Книги
+Textbase/books/
+books/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+*.iml
+.idea/
