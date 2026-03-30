@@ -26,6 +26,7 @@ from difflib import SequenceMatcher
 WAITING_ARTIST_NAME = 1
 WAITING_CATEGORY = 2
 WAITING_YOUTUBE_URL = 3
+WAITING_QUOTE_SOURCE = 4
 
 
 def _load_json(path: str, default_factory):
@@ -403,6 +404,32 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     parse_mode=telegram.constants.ParseMode.HTML)
 
 
+async def quote_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'quote_good':
+        await query.answer('👍 Рада що сподобалось!', show_alert=False)
+    elif query.data == 'quote_bad':
+        original_text = query.message.text or ''
+        quotes = _load_json(BOOK_QUOTES_FILE, list)
+        bad = next((q for q in quotes if q['text'] in original_text), None)
+        if bad:
+            blacklist = _load_json(BOOK_QUOTES_BLACKLIST_FILE, list)
+            if bad['text'] not in blacklist:
+                blacklist.append(bad['text'])
+                _save_json(BOOK_QUOTES_BLACKLIST_FILE, blacklist)
+            quotes = [q for q in quotes if q['text'] != bad['text']]
+            _save_json(BOOK_QUOTES_FILE, quotes)
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer('🗑 Прибрала з бази', show_alert=False)
+    elif query.data == 'quote_next':
+        q = get_random_book_quote()
+        if q:
+            await query.message.edit_text(format_quote(q),
+                                          parse_mode=telegram.constants.ParseMode.HTML,
+                                          reply_markup=quote_keyboard())
+
+
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -547,7 +574,7 @@ async def receive_artist_name(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 OLLAMA_MODEL = 'uamarchuan/lapa-v0.1.2-instruct:Q4_K_M'
-BOOKS_DIR = './books'
+BOOKS_DIR = './Textbase/books'
 SAMPLE_LENGTH = 1500
 
 
@@ -576,6 +603,44 @@ def load_book_samples() -> str:
 
 
 book_samples = load_book_samples()
+
+BOOK_QUOTES_FILE = './content/book_quotes.json'
+BOOK_QUOTES_BLACKLIST_FILE = './content/book_quotes_blacklist.json'
+
+
+def get_random_book_quote() -> dict | None:
+    quotes = _load_json(BOOK_QUOTES_FILE, list)
+    if not quotes:
+        return None
+    return random.choice(quotes)
+
+
+def quote_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton('👍 Влучно', callback_data='quote_good'),
+        InlineKeyboardButton('👎 Не цитата', callback_data='quote_bad'),
+        InlineKeyboardButton('🔄 Ще одну', callback_data='quote_next'),
+    ]])
+
+
+def format_quote(q: dict) -> str:
+    return f'📖 <i>«{q["text"]}»</i>\n\n— {q["book"]}'
+
+
+async def send_daily_quote(bot):
+    q = get_random_book_quote()
+    if not q:
+        return
+    text = format_quote(q)
+    async def _send(user_id):
+        try:
+            await bot.send_message(chat_id=user_id, text=text,
+                                   parse_mode=telegram.constants.ParseMode.HTML,
+                                   reply_markup=quote_keyboard())
+        except Exception:
+            pass
+    await asyncio.gather(*[_send(uid) for uid in known_users])
+
 
 EPIC_API = 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=uk&country=UA&allowCountries=UA'
 SENT_GAMES_FILE = './sent_games.json'
@@ -871,6 +936,7 @@ def category_keyboard():
          InlineKeyboardButton('😂 Жарт', callback_data='cat_joke')],
         [InlineKeyboardButton('🖼 Мем', callback_data='cat_meme'),
          InlineKeyboardButton('📰 Новина', callback_data='cat_news')],
+        [InlineKeyboardButton('📖 Книжкова цитата', callback_data='cat_book_quote')],
         [InlineKeyboardButton('❌ Скасувати', callback_data='cat_cancel')],
     ])
 
@@ -898,6 +964,15 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text('Скасовано.')
         return ConversationHandler.END
 
+    if query.data == 'cat_book_quote':
+        pending = context.user_data.get('pending')
+        if not pending:
+            await query.message.edit_text('Щось пішло не так, спробуй ще раз.')
+            return ConversationHandler.END
+        await query.message.edit_text('Звідки цитата?\nНапиши автора і книгу, наприклад:\n<code>Роджер Желязни. Ніч у самотньому жовтні</code>',
+                                      parse_mode=telegram.constants.ParseMode.HTML)
+        return WAITING_QUOTE_SOURCE
+
     category = query.data.replace('cat_', '')
     pending = context.user_data.get('pending')
     if not pending:
@@ -909,6 +984,27 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     labels = {'quote': 'цитату', 'joke': 'жарт', 'meme': 'мем', 'news': 'новину'}
     await query.message.edit_text(f'✅ Збережено як {labels[category]}!')
+    return ConversationHandler.END
+
+
+async def receive_quote_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source = update.message.text.strip()
+    pending = context.user_data.pop('pending', None)
+    if not pending:
+        await update.message.reply_text('Щось пішло не так, спробуй ще раз.')
+        return ConversationHandler.END
+
+    text = pending.get('text', '')
+    blacklist = set(_load_json(BOOK_QUOTES_BLACKLIST_FILE, list))
+    if text in blacklist:
+        await update.message.reply_text('⚠️ Ця цитата в чорному списку.')
+        return ConversationHandler.END
+
+    quotes = _load_json(BOOK_QUOTES_FILE, list)
+    quotes.append({'text': text, 'book': source})
+    _save_json(BOOK_QUOTES_FILE, quotes)
+    await update.message.reply_text(f'✅ Збережено!\n\n📖 <i>«{text}»</i>\n— {source}',
+                                    parse_mode=telegram.constants.ParseMode.HTML)
     return ConversationHandler.END
 
 
@@ -929,6 +1025,20 @@ async def meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=m['file_id'],
         caption=m.get('caption') or '',
     ))
+
+
+async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = get_random_book_quote()
+    if not q:
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text='Книг ще немає. Додай epub у папку books/')
+        return
+    track(update.effective_user.id, await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=format_quote(q),
+        parse_mode=telegram.constants.ParseMode.HTML,
+        reply_markup=quote_keyboard()))
+
+
 
 
 async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1164,6 +1274,14 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            reply_to_message_id=update.message.message_id,
                                            parse_mode=telegram.constants.ParseMode.HTML))
             return
+        if any(w in message_lowercase for w in ('цитат', 'книж', 'читав', 'читала', 'письменник', 'літератур')):
+            q = get_random_book_quote()
+            if q:
+                track(uid, await context.bot.send_message(chat_id=update.effective_chat.id, text=format_quote(q),
+                                               reply_to_message_id=update.message.message_id,
+                                               parse_mode=telegram.constants.ParseMode.HTML,
+                                               reply_markup=quote_keyboard()))
+                return
         if random.random() < 0.1:
             if await maybe_send_meme(context.bot, update.effective_chat.id, uid,
                                      reply_to=update.message.message_id):
@@ -1183,6 +1301,13 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f'<i>{get_random_joke()}</i>',
                                            reply_to_message_id=update.message.message_id,
                                            parse_mode=telegram.constants.ParseMode.HTML)
+        elif any(w in message_lowercase for w in ('цитат', 'книж', 'читав', 'читала', 'письменник', 'літератур')):
+            q = get_random_book_quote()
+            if q:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=format_quote(q),
+                                               reply_to_message_id=update.message.message_id,
+                                               parse_mode=telegram.constants.ParseMode.HTML,
+                                               reply_markup=quote_keyboard())
         elif 'вмієш' in message_lowercase:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=functionality["0"],
                                            reply_to_message_id=update.message.message_id,
@@ -1313,6 +1438,7 @@ if __name__ == '__main__':
         ],
         states={
             WAITING_CATEGORY: [CallbackQueryHandler(category_callback, pattern='^cat_')],
+            WAITING_QUOTE_SOURCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_quote_source)],
         },
         fallbacks=[],
         per_message=False,
@@ -1346,6 +1472,7 @@ if __name__ == '__main__':
 
     start_handler = CommandHandler('start', start)
     ask_handler = CommandHandler('ask', ask)
+    quote_handler = CommandHandler('quote', quote)
     meme_handler = CommandHandler('meme', meme)
     users_handler = CommandHandler('users', users)
     top_handler = CommandHandler('top', top)
@@ -1354,11 +1481,13 @@ if __name__ == '__main__':
     epic_handler = CommandHandler('epic', epic)
     echo_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), echo)
 
+    application.add_handler(CallbackQueryHandler(quote_button, pattern='^quote_'))
     application.add_handler(admin_conv)
     application.add_handler(youtube_conv)
     application.add_handler(music_conv)
     application.add_handler(start_handler)
     application.add_handler(ask_handler)
+    application.add_handler(quote_handler)
     application.add_handler(meme_handler)
     application.add_handler(users_handler)
     application.add_handler(top_handler)
@@ -1397,6 +1526,11 @@ if __name__ == '__main__':
         scheduler.add_job(
             send_weekly_top,
             CronTrigger(day_of_week='sun', hour=11, minute=0, timezone=pytz.timezone('Europe/Kyiv')),
+            args=[app.bot],
+        )
+        scheduler.add_job(
+            send_daily_quote,
+            CronTrigger(hour=9, minute=0, timezone=pytz.timezone('Europe/Kyiv')),
             args=[app.bot],
         )
         scheduler.start()
